@@ -1,0 +1,77 @@
+{
+  "name": "html2mp4",
+  "version": "1.0.0",
+  "description": "轻量本地 HTML 转 MP4 工具，面向创作者与演示",
+  "main": "electron/main.js",
+  "type": "module",
+  "scripts": {
+    "start": "electron .",
+    "doctor": "node src/doctor.js",
+    "dist": "electron-builder --win --publish never"
+  },
+  "keywords": [
+    "html",
+    "mp4",
+    "video",
+    "converter",
+    "animation",
+    "presentation"
+  ],
+  "author": "Kleivin Gjuzi",
+  "license": "MIT",
+  "homepage": "https://github.com/yym5201314/Htmltools#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yym5201314/Htmltools.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yym5201314/Htmltools/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ffmpeg-static": "^5.2.0",
+    "multer": "^1.4.5-lts.1",
+    "open": "^10.1.0"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.html2mp4.app",
+    "productName": "html2mp4",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "public/**/*",
+      "!public/logo.png",
+      "electron/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}
