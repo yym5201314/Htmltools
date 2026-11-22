@@ -1,7 +1,7 @@
 import { BrowserWindow, screen } from 'electron';
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PRELOAD = path.join(__dirname, 'timing-preload.cjs');
@@ -37,8 +37,11 @@ function waitForPaint(wc, timeout) {
 /**
  * Renders HTML to frames using Electron's own bundled Chromium (offscreen
  * BrowserWindow + capturePage). Ships ZERO extra browser; it reuses the
- * Chromium that Electron already contains. The server calls render(input,
- * { onFrame }) and stays agnostic to the rendering backend.
+ * Chromium that Electron already contains.
+ *
+ * Usage: open() loads the page and reports what the page needs (duration,
+ * audio files), then capture() streams frames. open() is separate so the
+ * encoder can be started with the audio tracks already known.
  */
 export class ElectronRenderer {
   constructor(options = {}) {
@@ -52,6 +55,8 @@ export class ElectronRenderer {
     this.onLog = options.onLog || (() => {});
     this.cancelled = false;
     this.win = null;
+    this.wc = null;
+    this.opened = null;
   }
 
   async cancel() {
@@ -59,6 +64,16 @@ export class ElectronRenderer {
     if (this.win && !this.win.isDestroyed()) {
       try { this.win.destroy(); } catch {}
     }
+    this.win = null;
+    this.wc = null;
+  }
+
+  async close() {
+    if (this.win && !this.win.isDestroyed()) {
+      try { this.win.destroy(); } catch {}
+    }
+    this.win = null;
+    this.wc = null;
   }
 
   resolveFile(inputPath) {
@@ -73,24 +88,19 @@ export class ElectronRenderer {
     return path.resolve(inputPath);
   }
 
-  async render(inputPath, { onFrame }) {
-    const totalFrames = Math.ceil(this.fps * this.duration);
-    const frameDuration = 1000 / this.fps;
-    const captureType = this.quality === 'high' ? 'png' : 'jpeg';
+  /** Load the page and report duration + audio sources. */
+  async open(inputPath) {
+    const file = this.resolveFile(inputPath);
+    this.onLog(`正在载入 ${file}`);
 
-    // Key speed trick: an offscreen window always captures at the display's
-    // device scale factor (e.g. 2x on Retina). We instead size the window to
-    // target/scaleFactor and zoom the page by the inverse, so the captured
-    // surface lands at exactly the target resolution, since reading back up to 4x
-    // fewer pixels per frame. "high" captures at 2x for supersampling.
+    // An offscreen window always captures at the display's device scale factor
+    // (2x on Retina), so size the window to target/scaleFactor and zoom the page
+    // by the inverse: the captured surface lands at exactly the target size.
     const scaleFactor = screen.getPrimaryDisplay().scaleFactor || 1;
     const captureScale = this.quality === 'high' ? 2 : 1;
     const zoom = captureScale / scaleFactor;
     const winW = Math.max(1, Math.round((this.width * captureScale) / scaleFactor));
     const winH = Math.max(1, Math.round((this.height * captureScale) / scaleFactor));
-
-    const qualityName = { draft: '草稿', high: '高画质' }[this.quality] || '标准';
-    this.onLog(`渲染：${this.width}x${this.height} @ ${this.fps}fps · ${this.duration}s · ${totalFrames} 帧 · ${qualityName}`);
 
     this.win = new BrowserWindow({
       width: winW,
@@ -105,67 +115,121 @@ export class ElectronRenderer {
         preload: PRELOAD,
       },
     });
-    const wc = this.win.webContents;
-    // Cap the offscreen paint rate; we drive time manually anyway.
+    const wc = (this.wc = this.win.webContents);
     wc.setFrameRate(60);
 
+    await this.win.loadFile(file);
+    wc.setZoomFactor(zoom);
+
+    if (this.hideControls) {
+      await wc.insertCSS(HIDE_CONTROLS_CSS);
+      this.onLog('导出时隐藏播放器控件');
+    }
+
+    await wc.executeJavaScript(
+      'document.fonts && document.fonts.ready ? document.fonts.ready.then(() => true) : true'
+    );
+    await delay(300);
+
+    // Click through any "start / play" cover so the page's own clock begins.
+    const started = await wc
+      .executeJavaScript('window.__h2m_autostart ? window.__h2m_autostart() : false')
+      .catch(() => false);
+    if (started) {
+      await delay(250);
+    }
+
+    const info = await wc
+      .executeJavaScript(
+        'JSON.stringify({ probe: window.__h2m_probe ? window.__h2m_probe() : null, audio: window.__h2m_audio ? window.__h2m_audio() : [] })'
+      )
+      .then((s) => JSON.parse(s))
+      .catch(() => ({ probe: null, audio: [] }));
+
+    await wc.executeJavaScript('window.__h2m_pause && window.__h2m_pause()');
+
+    const audio = [];
+    for (const item of info.audio || []) {
+      const local = toLocalPath(item.src);
+      if (!local || !fs.existsSync(local)) continue;
+      if (audio.some((a) => a.path === local)) continue;
+      audio.push({ path: local, volume: Number(item.volume) || 1 });
+    }
+
+    const pageDuration = info.probe && Number.isFinite(info.probe.duration) ? info.probe.duration : 0;
+    this.opened = {
+      file,
+      audio,
+      pageDuration,
+      durationSource: (info.probe && info.probe.source) || '',
+      started,
+    };
+
+    if (pageDuration > 0) {
+      this.onLog(`页面时长：${pageDuration.toFixed(2)} 秒（${this.opened.durationSource}）`);
+    }
+    if (audio.length > 0) {
+      this.onLog(`找到 ${audio.length} 个音轨：${audio.map((a) => path.basename(a.path)).join('、')}`);
+    }
+
+    return this.opened;
+  }
+
+  /** Capture one frame per tick until the requested duration is covered. */
+  async capture({ onFrame }) {
+    if (!this.wc) throw new Error('渲染器尚未打开页面（先调用 open）；');
+    const wc = this.wc;
+    const totalFrames = Math.ceil(this.fps * this.duration);
+    const frameDuration = 1000 / this.fps;
+    const captureType = this.quality === 'high' ? 'png' : 'jpeg';
+
+    this.onLog(`渲染：${this.width}x${this.height} @ ${this.fps}fps · ${this.duration}s · ${totalFrames} 帧`);
+    this.onLog('正在捕获帧…');
+
+    for (let i = 0; i < totalFrames; i++) {
+      if (this.cancelled) {
+        this.onLog('渲染已取消');
+        return null;
+      }
+
+      await wc.executeJavaScript(`window.__h2m_advance(${frameDuration})`);
+      await waitForPaint(wc, 24);
+
+      let img = await wc.capturePage();
+      const size = img.getSize();
+      if (i === 0) this.onLog(`捕获画布：${size.width}x${size.height}（目标 ${this.width}x${this.height}）`);
+      if (size.width !== this.width || size.height !== this.height) {
+        img = img.resize({ width: this.width, height: this.height, quality: 'good' });
+      }
+
+      const buffer = captureType === 'jpeg' ? img.toJPEG(92) : img.toPNG();
+      await onFrame(buffer, i);
+      this.onProgress(Math.round(((i + 1) / totalFrames) * 95));
+    }
+
+    this.onLog(`已捕获 ${totalFrames} 帧`);
+    return { totalFrames };
+  }
+
+  /** Convenience path: open + capture in one call. */
+  async render(inputPath, { onFrame }) {
     try {
-      const file = this.resolveFile(inputPath);
-      this.onLog(`正在载入 ${file}`);
-      await this.win.loadFile(file);
-      wc.setZoomFactor(zoom);
-
-      if (this.hideControls) {
-        await wc.insertCSS(HIDE_CONTROLS_CSS);
-        this.onLog('导出时隐藏播放器控件');
-      }
-
-      // Let fonts + layout settle before the first capture.
-      await wc.executeJavaScript('document.fonts && document.fonts.ready ? document.fonts.ready.then(() => true) : true');
-      await delay(300);
-
-      // Click through any "start / play" cover so the page's own clock begins.
-      const started = await wc
-        .executeJavaScript('window.__h2m_autostart ? window.__h2m_autostart() : false')
-        .catch(() => false);
-      if (started) {
-        this.onLog('已触发页面的开始播放交互');
-        await delay(250);
-      }
-
-      await wc.executeJavaScript('window.__h2m_pause && window.__h2m_pause()');
-
-      this.onLog('正在捕获帧…');
-
-      for (let i = 0; i < totalFrames; i++) {
-        if (this.cancelled) {
-          this.onLog('渲染已取消');
-          return null;
-        }
-
-        await wc.executeJavaScript(`window.__h2m_advance(${frameDuration})`);
-        await waitForPaint(wc, 24);
-
-        let img = await wc.capturePage();
-        // Normalize to the exact target size (handles Retina 2x → crisp downscale).
-        const size = img.getSize();
-        if (i === 0) this.onLog(`捕获画布：${size.width}x${size.height}（目标 ${this.width}x${this.height}）`);
-        if (size.width !== this.width || size.height !== this.height) {
-          img = img.resize({ width: this.width, height: this.height, quality: 'good' });
-        }
-
-        const buffer = captureType === 'jpeg' ? img.toJPEG(92) : img.toPNG();
-        await onFrame(buffer, i);
-        this.onProgress(Math.round(((i + 1) / totalFrames) * 95));
-      }
-
-      this.onLog(`已捕获 ${totalFrames} 帧`);
-      return { totalFrames };
+      await this.open(inputPath);
+      return await this.capture({ onFrame });
     } finally {
-      if (this.win && !this.win.isDestroyed()) {
-        this.win.destroy();
-      }
-      this.win = null;
+      await this.close();
     }
   }
 }
+
+function toLocalPath(src) {
+  if (!src) return null;
+  try {
+    if (src.startsWith('file:')) return fileURLToPath(src);
+    return path.resolve(decodeURIComponent(src));
+  } catch {
+    return null;
+  }
+}
+
+export { pathToFileURL };

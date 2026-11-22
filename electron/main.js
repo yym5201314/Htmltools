@@ -1,5 +1,7 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, dialog } from 'electron';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 import http from 'http';
 import { fileURLToPath } from 'url';
 import { ElectronRenderer } from './electron-renderer.js';
@@ -34,18 +36,76 @@ function waitForServer(url, timeoutMs = 20000) {
   });
 }
 
+function defaultOutputDir() {
+  return path.join(os.homedir(), 'html2mp4-output');
+}
+
+function registerIpc() {
+  ipcMain.handle('h2m:pick-file', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: '选择 HTML 文件',
+      properties: ['openFile'],
+      filters: [{ name: 'HTML', extensions: ['html', 'htm'] }],
+    });
+    return canceled ? null : filePaths[0];
+  });
+
+  ipcMain.handle('h2m:pick-folder', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: '选择包含 index.html 的文件夹',
+      properties: ['openDirectory'],
+    });
+    return canceled ? null : filePaths[0];
+  });
+
+  ipcMain.handle('h2m:pick-audio', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: '选择音频文件（可选）',
+      properties: ['openFile'],
+      filters: [{ name: '音频/视频', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac', 'mp4'] }],
+    });
+    return canceled ? null : filePaths[0];
+  });
+
+  ipcMain.handle('h2m:pick-output', async (_event, suggested) => {
+    const dir = defaultOutputDir();
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: '保存 MP4',
+      defaultPath: path.join(dir, `${suggested || 'html2mp4-导出'}.mp4`),
+      filters: [{ name: 'MP4 视频', extensions: ['mp4'] }],
+    });
+    return canceled ? null : filePath;
+  });
+
+  ipcMain.handle('h2m:open-path', async (_event, target) => {
+    if (!target) return false;
+    // A missing file (e.g. the video was moved) falls back to its folder.
+    const openTarget = fs.existsSync(target) ? target : path.dirname(target);
+    try { return shell.openPath(openTarget); } catch { return false; }
+  });
+
+  ipcMain.handle('h2m:version', () => app.getVersion());
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1040,
-    height: 1120,
-    minWidth: 760,
-    minHeight: 680,
-    backgroundColor: '#0B0A08',
-    title: 'html2mp4',
+    width: 940,
+    height: 900,
+    minWidth: 820,
+    minHeight: 720,
+    backgroundColor: '#F6F7F9',
+    title: 'HTML 转视频',
     show: false,
     icon: path.join(__dirname, '..', 'build', 'icon.png'),
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.cjs'),
+    },
   });
+
+  mainWindow.once('ready-to-show', () => mainWindow.show());
 
   // Open external links in the user's browser, never inside the app window.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -61,7 +121,10 @@ async function createWindow() {
   mainWindow.show();
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  registerIpc();
+  return createWindow();
+});
 
 app.on('window-all-closed', () => app.quit());
 

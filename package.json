@@ -1,6 +1,6 @@
 {
   "name": "html2mp4",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "轻量本地 HTML 转 MP4 工具，面向创作者与演示",
   "main": "electron/main.js",
   "type": "module",
@@ -64,14 +64,21 @@
     },
     "win": {
       "target": [
-        "nsis"
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
       ],
       "icon": "build/icon.png"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true
+      "createDesktopShortcut": true,
+      "shortcutName": "HTML转视频",
+      "artifactName": "html2mp4-${version}-setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "html2mp4-${version}-portable.${ext}",
+      "requestExecutionLevel": "user"
     }
   }
 }

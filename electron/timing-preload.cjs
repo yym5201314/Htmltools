@@ -119,10 +119,14 @@
 
   // Many pieces wait for a click on a cover / play button before starting their
   // timeline. Nobody clicks during a render, so dispatch a real click for them.
+  const silentForUs = new WeakSet();
+
   window.__h2m_autostart = () => {
     // Silence media first: muted playback is never blocked, so the page's
-    // play() promise resolves and its clock loop actually starts.
+    // play() promise resolves and its clock loop actually starts. Remember
+    // which elements were audible, so the audio collector still reports them.
     for (const el of document.querySelectorAll('audio, video')) {
+      if (!el.muted && !el.defaultMuted) silentForUs.add(el);
       el.muted = true;
       el.defaultMuted = true;
     }
@@ -148,5 +152,80 @@
       } catch {}
     }
     return true;
+  };
+
+  // Audio that the page actually plays, so it can be muxed into the MP4.
+  window.__h2m_audio = () => {
+    const media = [...document.querySelectorAll('audio'), ...document.querySelectorAll('video')];
+    const out = [];
+    const seen = new Set();
+    for (const m of media) {
+      const silencedByUs = silentForUs.has(m);
+      if (!silencedByUs && (m.muted || m.defaultMuted)) continue;
+      const src = m.currentSrc || m.src || (m.querySelector('source[src]') || {}).src;
+      if (!src || seen.has(src)) continue;
+      seen.add(src);
+      out.push({ src, volume: typeof m.volume === 'number' ? m.volume : 1 });
+    }
+    return out;
+  };
+
+  // Best-effort guess of how long the piece runs. Pages expose this in wildly
+  // different ways, so try the common ones in order of reliability.
+  window.__h2m_probe = () => {
+    const valid = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0.2 && n <= 3600;
+
+    for (const name of ['TOTAL', 'DURATION', 'TOTAL_TIME', 'TOTAL_DURATION', 'totalDuration', 'totalTime', 'videoDuration']) {
+      try {
+        const n = (0, eval)(name);
+        if (valid(n)) return { duration: n, source: name };
+      } catch (_) {}
+    }
+
+    for (const name of ['TL', 'SHOTS', 'SCENES', 'SEGMENTS', 'CLIPS', 'TIMELINE', 'scenes', 'timeline']) {
+      try {
+        const array = (0, eval)(name);
+        if (!Array.isArray(array) || !array.length) continue;
+        for (const key of ['d', 'dur', 'duration']) {
+          if (array.every((x) => x && valid(x[key]))) {
+            const n = array.reduce((a, x) => a + x[key], 0);
+            if (valid(n)) return { duration: n, source: `${name}.${key}` };
+          }
+        }
+      } catch (_) {}
+    }
+
+    const data = Number(document.body.dataset.duration || document.documentElement.dataset.duration);
+    if (valid(data)) return { duration: data, source: 'data-duration' };
+
+    const total = document.querySelector('#tcAll,#tc-all,.total-time,.total-duration');
+    if (total) {
+      const m = /(?:(\d+):)?(\d+):(\d{1,2}(?:\.\d+)?)/.exec(total.textContent || '');
+      if (m) {
+        const n = Number(m[1] || 0) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+        if (valid(n)) return { duration: n, source: '时间码' };
+      }
+    }
+
+    let max = 0;
+    let mediaSource = '';
+    for (const m of document.querySelectorAll('audio, video')) {
+      if (valid(m.duration) && m.duration > max) {
+        max = m.duration;
+        mediaSource = '媒体时长';
+      }
+    }
+    if (max) return { duration: max, source: mediaSource };
+
+    for (const a of document.getAnimations()) {
+      try {
+        const timing = a.effect.getComputedTiming();
+        if (typeof timing.endTime === 'number' && timing.endTime / 1000 > max) {
+          max = timing.endTime / 1000;
+          mediaSource = 'CSS 动画';
+        }
+      } catch (_) {}
+    }
+    return { duration: max, source: max ? mediaSource : '' };
   };
 })();

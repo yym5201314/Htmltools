@@ -82,6 +82,43 @@ app.post('/api/settings', (req, res) => {
   res.json({ ok: true });
 });
 
+// Load a page in a throwaway window and report how long it runs + what audio it
+// plays, so the UI can prefill the duration field.
+app.post('/api/probe', upload.array('files', 100), async (req, res) => {
+  const config = JSON.parse(req.body.config || '{}');
+  let inputPath = config.localPath;
+  if (!inputPath) {
+    const htmlFile = (req.files || []).find(
+      (f) => f.originalname.endsWith('.html') || f.originalname.endsWith('.htm')
+    );
+    if (!htmlFile) return res.status(400).json({ error: '未提供 HTML 文件' });
+    inputPath = htmlFile.path;
+  }
+
+  let renderer;
+  try {
+    renderer = await makeRenderer({
+      width: 1280,
+      height: 720,
+      fps: 30,
+      duration: 1,
+      quality: 'draft',
+      hideControls: config.hideControls !== false,
+      onLog: () => {},
+    });
+    const info = await renderer.open(inputPath);
+    res.json({
+      duration: info.pageDuration,
+      source: info.durationSource,
+      audio: info.audio.map((a) => ({ path: a.path, name: path.basename(a.path) })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (renderer) await renderer.close();
+  }
+});
+
 app.post('/api/render', upload.array('files', 100), async (req, res) => {
   const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const config = JSON.parse(req.body.config || '{}');
@@ -110,9 +147,18 @@ app.post('/api/render', upload.array('files', 100), async (req, res) => {
   }
 
   // Determine output path
-  const outputDir = config.outputDir || path.join(os.homedir(), 'html2mp4-output');
+  const outputPath = config.outputPath
+    ? path.resolve(config.outputPath)
+    : path.join(
+        (() => {
+          const dir = config.outputDir || path.join(os.homedir(), 'html2mp4-output');
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+          return dir;
+        })(),
+        `${outputName}.mp4`
+      );
+  const outputDir = path.dirname(outputPath);
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-  const outputPath = path.join(outputDir, `${outputName}.mp4`);
 
   const job = {
     id: jobId,
@@ -139,18 +185,38 @@ app.post('/api/render', upload.array('files', 100), async (req, res) => {
         onProgress: (p) => { job.progress = p; },
         onLog: log,
       });
-      const encoder = new Encoder({ fps, quality, onLog: log });
-
       job.renderer = renderer;
+
+      // Load the page first: it reports its own length and which audio files it
+      // plays, both of which the encoder needs before it can be started.
+      const info = await renderer.open(inputPath);
+      if (!config.duration && info.pageDuration > 0) {
+        renderer.duration = info.pageDuration;
+        log(`未指定时长，使用页面时长 ${info.pageDuration.toFixed(2)} 秒`);
+      }
+      const audio = config.mute === true
+        ? []
+        : config.audioPath
+          ? [{ path: path.resolve(config.audioPath), volume: 1 }]
+          : info.audio;
+
+      const encoder = new Encoder({
+        fps,
+        quality,
+        audio,
+        duration: info.pageDuration && !config.duration ? info.pageDuration : duration,
+        onLog: log,
+      });
       job.encoder = encoder;
 
       // Spawn FFmpeg up front; frames are streamed straight into it as they render.
-      const done = encoder.start(outputPath);
+      const { done } = await encoder.start(outputPath);
       done.catch(() => {}); // real reason surfaced via finish(); avoid unhandled rejection
 
-      const result = await renderer.render(inputPath, {
+      const result = await renderer.capture({
         onFrame: (buf) => encoder.writeFrame(buf),
       });
+      await renderer.close();
 
       if (!result) {
         encoder.cancel();
@@ -170,7 +236,7 @@ app.post('/api/render', upload.array('files', 100), async (req, res) => {
       log(`耗时 ${job.duration} 秒完成：${outputPath}`);
 
       // Save last used settings
-      saveSettings({ preset: config.preset, width, height, fps, duration, quality, outputDir, outputName });
+      saveSettings({ width, height, fps, duration, quality, outputPath });
 
     } catch (err) {
       job.status = 'error';

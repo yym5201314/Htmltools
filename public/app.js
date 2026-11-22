@@ -1,477 +1,426 @@
-// html2mp4 frontend
+// HTML 转视频 · 前端
+const $ = (id) => document.getElementById(id);
 
-let presets = {};
-let selectedPreset = 'youtube';
-let selectedFiles = null;
-let currentJobId = null;
-let pollInterval = null;
+const el = {
+  version: $('version'),
+  inputPath: $('inputPath'),
+  outputPath: $('outputPath'),
+  pickFile: $('pickFile'),
+  pickFolder: $('pickFolder'),
+  pickOutput: $('pickOutput'),
+  audioMode: $('audioMode'),
+  audioPath: $('audioPath'),
+  pickAudio: $('pickAudio'),
+  audioHint: $('audioHint'),
+  resChips: $('resChips'),
+  width: $('width'),
+  height: $('height'),
+  fps: $('fps'),
+  duration: $('duration'),
+  autoDuration: $('autoDuration'),
+  durationHint: $('durationHint'),
+  quality: $('quality'),
+  hideControls: $('hideControls'),
+  startBtn: $('startBtn'),
+  cancelBtn: $('cancelBtn'),
+  openVideo: $('openVideo'),
+  openFolder: $('openFolder'),
+  barFill: $('barFill'),
+  status: $('status'),
+  percent: $('percent'),
+  log: $('log'),
+  fallbackFile: $('fallbackFile'),
+};
 
-// DOM
-const dropZone = document.getElementById('dropZone');
-const fileInput = document.getElementById('fileInput');
-const fileInfo = document.getElementById('fileInfo');
-const fileName = document.getElementById('fileName');
-const clearFile = document.getElementById('clearFile');
-const presetGrid = document.getElementById('presetGrid');
-const widthInput = document.getElementById('widthInput');
-const heightInput = document.getElementById('heightInput');
-const fpsInput = document.getElementById('fpsInput');
-const durationInput = document.getElementById('durationInput');
-const qualitySelect = document.getElementById('qualitySelect');
-const outputName = document.getElementById('outputName');
-const frameCount = document.getElementById('frameCount');
-const renderEstimate = document.getElementById('renderEstimate');
-const renderBtn = document.getElementById('renderBtn');
-const progressSection = document.getElementById('progressSection');
-const progressTitle = document.getElementById('progressTitle');
-const progressBar = document.getElementById('progressBar');
-const walker = document.getElementById('walker');
-const progressPercent = document.getElementById('progressPercent');
-const progressPhase = document.getElementById('progressPhase');
-const logBox = document.getElementById('logBox');
-const cancelBtn = document.getElementById('cancelBtn');
-const completeSection = document.getElementById('completeSection');
-const completePath = document.getElementById('completePath');
-const completeTime = document.getElementById('completeTime');
-const openFileBtn = document.getElementById('openFileBtn');
-const openFolderBtn = document.getElementById('openFolderBtn');
-const newExportBtn = document.getElementById('newExportBtn');
-const errorSection = document.getElementById('errorSection');
-const errorMessage = document.getElementById('errorMessage');
-const errorLogBox = document.getElementById('errorLogBox');
-const retryBtn = document.getElementById('retryBtn');
-const healthBtn = document.getElementById('healthBtn');
-const healthModal = document.getElementById('healthModal');
-const healthContent = document.getElementById('healthContent');
-const closeHealth = document.getElementById('closeHealth');
-const openOutputBtn = document.getElementById('openOutputBtn');
-const hideControls = document.getElementById('hideControls');
+const desktop = !!window.h2m;
 
-// Init
-async function init() {
-  const res = await fetch('/api/presets');
-  presets = await res.json();
-  renderPresets();
+const state = {
+  inputPath: '',
+  inputName: '',
+  outputPath: '',
+  audioPath: '',
+  durationTouched: false,
+  probing: false,
+  jobId: '',
+  timer: null,
+  outputDir: '',
+  pageAudio: [],
+};
 
-  // Load saved settings
+// ---------------------------------------------------------------- helpers
+function setStatus(text) {
+  el.status.textContent = text;
+}
+
+function setPercent(value) {
+  const p = Math.max(0, Math.min(100, Math.round(value || 0)));
+  el.percent.textContent = `${p}%`;
+  el.barFill.style.width = `${p}%`;
+}
+
+function appendLog(line) {
+  if (!line) return;
+  el.log.textContent = el.log.textContent ? `${el.log.textContent}\n${line}` : line;
+  el.log.scrollTop = el.log.scrollHeight;
+}
+
+function setHint(node, text, cls) {
+  node.textContent = text;
+  node.className = `hint${cls ? ` ${cls}` : ''}`;
+}
+
+function baseName(p) {
+  const name = String(p || '').replace(/\\/g, '/').split('/').pop() || '';
+  return name.replace(/\.(html?|htm)$/i, '');
+}
+
+function joinPath(dir, name) {
+  if (!dir) return '';
+  return `${dir.replace(/[\\/]+$/, '')}\\${name}`;
+}
+
+// ------------------------------------------------------------- input pick
+el.pickFile.addEventListener('click', async () => {
+  if (desktop) {
+    const p = await window.h2m.pickFile();
+    if (p) setInput(p, false);
+  } else {
+    el.fallbackFile.click();
+  }
+});
+
+el.pickFolder.addEventListener('click', async () => {
+  if (desktop) {
+    const p = await window.h2m.pickFolder();
+    if (p) setInput(p, true);
+  } else {
+    setHint(el.durationHint, '浏览器模式下不支持选择文件夹，请用桌面版', 'warn');
+  }
+});
+
+el.fallbackFile.addEventListener('change', () => {
+  const file = el.fallbackFile.files && el.fallbackFile.files[0];
+  if (file) setInput(file.name, false);
+});
+
+el.pickOutput.addEventListener('click', async () => {
+  if (!desktop) return;
+  const suggested = baseName(state.inputPath) || 'html2mp4-导出';
+  const p = await window.h2m.pickOutput(suggested);
+  if (p) {
+    state.outputPath = p;
+    el.outputPath.value = p;
+  }
+});
+
+el.audioMode.addEventListener('change', () => {
+  const mode = el.audioMode.value;
+  el.pickAudio.disabled = mode !== 'file';
+  if (mode === 'mute') {
+    setHint(el.audioHint, '不生成音轨');
+  } else if (mode === 'file') {
+    setHint(el.audioHint, state.audioPath ? `使用指定音频：${state.audioPath}` : '请选择一个音频文件');
+  } else {
+    showPageAudio();
+  }
+});
+
+el.pickAudio.addEventListener('click', async () => {
+  if (!desktop) return;
+  const p = await window.h2m.pickAudio();
+  if (p) {
+    state.audioPath = p;
+    el.audioPath.value = p;
+    setHint(el.audioHint, `使用指定音频：${p}`);
+  }
+});
+
+function showPageAudio() {
+  if (!state.pageAudio.length) {
+    setHint(el.audioHint, state.inputPath ? '页面里没有检测到音轨' : '选择 HTML 后自动检测页面里的音轨');
+    return;
+  }
+  const names = state.pageAudio.map((a) => a.name).join('、');
+  setHint(el.audioHint, `页面音轨：${names}`, 'ok');
+}
+
+async function setInput(path, isDir) {
+  state.inputPath = path;
+  state.inputName = baseName(path);
+  el.inputPath.value = path;
+  el.startBtn.disabled = false;
+  state.durationTouched = false;
+  state.pageAudio = [];
+  showPageAudio();
+
+  if (!el.outputPath.value && desktop) {
+    const suggested = state.inputName || 'html2mp4-导出';
+    state.outputPath = '';
+    el.outputPath.placeholder = `默认：用户目录\\html2mp4-output\\${suggested}.mp4`;
+  }
+
+  if (isDir) appendLog(`已选择文件夹：${path}`);
+  await probe();
+}
+
+// ------------------------------------------------------------------ probe
+async function probe() {
+  if (!state.inputPath || state.probing) return;
+  state.probing = true;
+  setHint(el.durationHint, '正在识别页面时长…');
+  el.autoDuration.disabled = true;
+
   try {
-    const settings = await (await fetch('/api/settings')).json();
-    if (settings.preset && presets[settings.preset]) {
-      selectPreset(settings.preset);
+    const form = new FormData();
+    form.append('config', JSON.stringify({ localPath: desktop ? state.inputPath : '', hideControls: el.hideControls.checked }));
+    if (!desktop) {
+      const file = el.fallbackFile.files && el.fallbackFile.files[0];
+      if (!file) throw new Error('请先选择文件');
+      form.append('files', file);
     }
-    if (settings.quality) qualitySelect.value = settings.quality;
-    if (settings.outputName) outputName.value = settings.outputName;
-  } catch {}
+    const res = await fetch('/api/probe', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
 
-  updateEstimates();
-}
+    state.pageAudio = data.audio || [];
+    if (el.audioMode.value === 'page') showPageAudio();
 
-// Presets
-function renderPresets() {
-  presetGrid.innerHTML = '';
-  for (const [key, preset] of Object.entries(presets)) {
-    const card = document.createElement('div');
-    card.className = `preset-card ${key === selectedPreset ? 'active' : ''}`;
-    card.dataset.key = key;
-    card.innerHTML = `
-      <div class="preset-icon">${preset.icon}</div>
-      <div class="preset-name">${preset.name}</div>
-      <div class="preset-desc">${key !== 'custom' ? `${preset.width}×${preset.height}` : preset.description}</div>
-    `;
-    card.addEventListener('click', () => selectPreset(key));
-    presetGrid.appendChild(card);
-  }
-}
-
-function selectPreset(key) {
-  selectedPreset = key;
-  const preset = presets[key];
-
-  document.querySelectorAll('.preset-card').forEach(c => c.classList.remove('active'));
-  document.querySelector(`.preset-card[data-key="${key}"]`)?.classList.add('active');
-
-  if (key !== 'custom') {
-    widthInput.value = preset.width;
-    heightInput.value = preset.height;
-    fpsInput.value = preset.fps;
-    durationInput.value = preset.duration;
-  }
-
-  // All fields stay editable; presets just prefill the values.
-  updateEstimates();
-}
-
-// Estimates
-function updateEstimates() {
-  const fps = parseInt(fpsInput.value) || 30;
-  const dur = parseFloat(durationInput.value) || 10;
-  const frames = Math.ceil(fps * dur);
-  const estimatedSec = Math.ceil(frames * 0.15);
-  frameCount.textContent = `${frames} 帧`;
-  renderEstimate.textContent = `预计约 ${estimatedSec} 秒`;
-}
-
-// When the user edits a value away from the active preset, switch to Custom.
-function onSettingEdit() {
-  if (selectedPreset !== 'custom') {
-    const p = presets[selectedPreset];
-    if (p && (parseInt(widthInput.value) !== p.width ||
-              parseInt(heightInput.value) !== p.height ||
-              parseInt(fpsInput.value) !== p.fps ||
-              parseFloat(durationInput.value) !== p.duration)) {
-      selectedPreset = 'custom';
-      document.querySelectorAll('.preset-card').forEach(c => c.classList.remove('active'));
-      document.querySelector('.preset-card[data-key="custom"]')?.classList.add('active');
+    if (data.duration > 0) {
+      const secs = Number(data.duration.toFixed(2));
+      if (!state.durationTouched || !el.duration.value) el.duration.value = secs;
+      setHint(el.durationHint, `已识别 ${secs} 秒${data.source ? `（来源：${data.source}）` : ''}`, 'ok');
+      appendLog(`识别到页面时长 ${secs} 秒${data.source ? `（${data.source}）` : ''}`);
+    } else {
+      setHint(el.durationHint, '没能自动识别时长，请手动填写', 'warn');
     }
-  }
-  updateEstimates();
-}
-
-widthInput.addEventListener('input', onSettingEdit);
-heightInput.addEventListener('input', onSettingEdit);
-fpsInput.addEventListener('input', onSettingEdit);
-durationInput.addEventListener('input', onSettingEdit);
-
-// File handling
-dropZone.addEventListener('click', () => fileInput.click());
-
-dropZone.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  dropZone.classList.add('drag-over');
-});
-dropZone.addEventListener('dragleave', () => {
-  dropZone.classList.remove('drag-over');
-});
-dropZone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  dropZone.classList.remove('drag-over');
-  handleFiles(e.dataTransfer.files);
-});
-
-fileInput.addEventListener('change', () => {
-  handleFiles(fileInput.files);
-});
-
-function handleFiles(files) {
-  if (!files || files.length === 0) return;
-  selectedFiles = files;
-  const htmlFile = Array.from(files).find(f => f.name.endsWith('.html') || f.name.endsWith('.htm'));
-  const displayName = htmlFile ? htmlFile.name : `${files.length} 个文件`;
-  fileName.textContent = displayName;
-  fileInfo.style.display = 'flex';
-  dropZone.style.display = 'none';
-  renderBtn.disabled = false;
-
-  if (!outputName.value) {
-    const base = htmlFile ? htmlFile.name.replace(/\.(html|htm)$/, '') : '导出';
-    outputName.value = base;
+  } catch (err) {
+    setHint(el.durationHint, `识别失败：${err.message}`, 'warn');
+  } finally {
+    state.probing = false;
+    el.autoDuration.disabled = false;
   }
 }
 
-clearFile.addEventListener('click', () => {
-  selectedFiles = null;
-  fileInput.value = '';
-  fileInfo.style.display = 'none';
-  dropZone.style.display = '';
-  renderBtn.disabled = true;
+el.autoDuration.addEventListener('click', () => {
+  state.durationTouched = false;
+  probe();
 });
 
-// Render
+el.duration.addEventListener('input', () => {
+  state.durationTouched = true;
+});
 
-// Fills the bar and walks the mascot along it. `--p` is a 0→1 number the
-// stylesheet turns into his left offset, so both stay in lockstep.
-function setProgress(pct) {
-  const p = Math.max(0, Math.min(100, pct || 0));
-  progressBar.style.width = `${p}%`;
-  walker.style.setProperty('--p', p / 100);
+// ------------------------------------------------------------ resolution
+el.resChips.addEventListener('click', (e) => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  el.resChips.querySelectorAll('.chip').forEach((c) => c.classList.remove('active'));
+  chip.classList.add('active');
+  const w = Number(chip.dataset.w);
+  const h = Number(chip.dataset.h);
+  if (w > 0 && h > 0) {
+    el.width.value = w;
+    el.height.value = h;
+  }
+});
+
+function syncChipsWithSize() {
+  const w = Number(el.width.value);
+  const h = Number(el.height.value);
+  let matched = null;
+  el.resChips.querySelectorAll('.chip').forEach((c) => {
+    const cw = Number(c.dataset.w);
+    const ch = Number(c.dataset.h);
+    c.classList.toggle('active', cw === w && ch === h);
+    if (cw === w && ch === h) matched = c;
+  });
+  if (!matched) {
+    const custom = el.resChips.querySelector('[data-w="0"]');
+    el.resChips.querySelectorAll('.chip').forEach((c) => c.classList.remove('active'));
+    custom.classList.add('active');
+  }
 }
 
-renderBtn.addEventListener('click', startRender);
+el.width.addEventListener('input', syncChipsWithSize);
+el.height.addEventListener('input', syncChipsWithSize);
+
+// ------------------------------------------------------------------ start
+el.startBtn.addEventListener('click', startRender);
 
 async function startRender() {
-  if (!selectedFiles) return;
-
-  // Prepare form data
-  const formData = new FormData();
-  for (const file of selectedFiles) {
-    formData.append('files', file);
-  }
+  if (!state.inputPath) return;
+  const width = Number(el.width.value) || 1920;
+  const height = Number(el.height.value) || 1080;
+  const fps = Number(el.fps.value) || 30;
+  const duration = Number(el.duration.value) || 0;
+  const audioMode = el.audioMode.value;
 
   const config = {
-    preset: selectedPreset,
-    width: parseInt(widthInput.value),
-    height: parseInt(heightInput.value),
-    fps: parseInt(fpsInput.value),
-    duration: parseFloat(durationInput.value),
-    quality: qualitySelect.value,
-    outputName: outputName.value || `html2mp4-${Date.now()}`,
-    hideControls: hideControls.checked,
+    width, height, fps, duration,
+    quality: el.quality.value,
+    hideControls: el.hideControls.checked,
+    mute: audioMode === 'mute',
+    audioPath: audioMode === 'file' ? state.audioPath : '',
+    localPath: desktop ? state.inputPath : '',
+    outputPath: desktop ? state.outputPath : '',
+    outputName: baseName(state.inputPath) || `html2mp4-${Date.now()}`,
   };
-  formData.append('config', JSON.stringify(config));
 
-  // Show progress
-  renderBtn.style.display = 'none';
-  progressSection.style.display = '';
-  completeSection.style.display = 'none';
-  errorSection.style.display = 'none';
-  progressBar.style.width = '0%';
-  setProgress(0);
-  progressPercent.textContent = '0%';
-  progressTitle.textContent = '正在渲染…';
-  progressPhase.textContent = '正在启动…';
-  logBox.textContent = '';
-  // Rendering is CPU-bound, so give it the cycles the backdrop was using.
-  backdrop.pause();
-
-  try {
-    const res = await fetch('/api/render', { method: 'POST', body: formData });
-    const data = await res.json();
-
-    if (data.error) {
-      showError(data.error, []);
+  const form = new FormData();
+  form.append('config', JSON.stringify(config));
+  if (!desktop) {
+    const file = el.fallbackFile.files && el.fallbackFile.files[0];
+    if (!file) {
+      setStatus('请先选择文件');
       return;
     }
+    form.append('files', file);
+  }
 
-    currentJobId = data.jobId;
-    pollJob();
+  el.log.textContent = '';
+  setPercent(0);
+  setStatus('正在启动…');
+  el.startBtn.disabled = true;
+  el.cancelBtn.disabled = false;
+  el.openVideo.disabled = true;
+  el.openFolder.disabled = true;
+
+  try {
+    const res = await fetch('/api/render', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    state.jobId = data.jobId;
+    poll();
   } catch (err) {
-    showError(err.message, []);
+    fail(err.message);
   }
 }
 
-function pollJob() {
-  if (pollInterval) clearInterval(pollInterval);
-
-  pollInterval = setInterval(async () => {
-    if (!currentJobId) return;
-
+function poll() {
+  if (state.timer) clearInterval(state.timer);
+  state.timer = setInterval(async () => {
+    if (!state.jobId) return;
     try {
-      const res = await fetch(`/api/job/${currentJobId}`);
+      const res = await fetch(`/api/job/${state.jobId}`);
       const job = await res.json();
-
-      setProgress(job.progress);
-      progressPercent.textContent = `${job.progress}%`;
-
-      if (job.progress <= 50) {
-        progressPhase.textContent = '正在捕获帧';
-        progressTitle.textContent = '正在渲染…';
-      } else {
-        progressPhase.textContent = '正在编码视频';
-        progressTitle.textContent = '正在编码…';
+      if (job.error && job.status !== 'complete') {
+        // 任务不存在等接口级错误
+        if (!job.status) throw new Error(job.error);
       }
 
-      logBox.textContent = job.logs.join('\n');
-      logBox.scrollTop = logBox.scrollHeight;
+      setPercent(job.progress || 0);
+      if (job.progress <= 50) setStatus('正在渲染画面');
+      else if (job.status !== 'complete') setStatus('正在编码视频');
+
+      const text = (job.logs || []).join('\n');
+      if (text !== el.log.textContent) {
+        el.log.textContent = text;
+        el.log.scrollTop = el.log.scrollHeight;
+      }
 
       if (job.status === 'complete') {
-        clearInterval(pollInterval);
-        showComplete(job);
+        done(job);
       } else if (job.status === 'error') {
-        clearInterval(pollInterval);
-        showError(job.error, job.logs);
+        fail(job.error || '转换失败', job.logs);
       } else if (job.status === 'cancelled') {
-        clearInterval(pollInterval);
-        resetUI();
+        reset();
+        setStatus('已取消');
       }
-    } catch {}
+    } catch (err) {
+      if (err && err.message) fail(err.message);
+    }
   }, 500);
 }
 
-cancelBtn.addEventListener('click', async () => {
-  if (!currentJobId) return;
-  await fetch(`/api/job/${currentJobId}/cancel`, { method: 'POST' });
-  clearInterval(pollInterval);
-  resetUI();
+function done(job) {
+  clearInterval(state.timer);
+  state.timer = null;
+  setPercent(100);
+  setStatus(`完成，用时 ${job.duration} 秒`);
+  el.startBtn.disabled = false;
+  el.cancelBtn.disabled = true;
+  el.openVideo.disabled = false;
+  el.openFolder.disabled = false;
+  state.outputPath = job.outputPath;
+  state.outputDir = job.outputDir;
+  el.outputPath.value = job.outputPath;
+}
+
+function fail(message, logs) {
+  clearInterval(state.timer);
+  state.timer = null;
+  el.startBtn.disabled = false;
+  el.cancelBtn.disabled = true;
+  setStatus('转换失败');
+  if (logs && logs.length) el.log.textContent = logs.join('\n');
+  appendLog(message);
+  setHint(el.durationHint, message, 'warn');
+}
+
+function reset() {
+  clearInterval(state.timer);
+  state.timer = null;
+  state.jobId = '';
+  el.startBtn.disabled = false;
+  el.cancelBtn.disabled = true;
+  setPercent(0);
+}
+
+el.cancelBtn.addEventListener('click', async () => {
+  if (!state.jobId) return;
+  el.cancelBtn.disabled = true;
+  setStatus('正在取消…');
+  try {
+    await fetch(`/api/job/${state.jobId}/cancel`, { method: 'POST' });
+  } catch {}
+  reset();
 });
 
-function showComplete(job) {
-  backdrop.resume();
-  progressSection.style.display = 'none';
-  completeSection.style.display = '';
-  completePath.textContent = job.outputPath;
-  completeTime.textContent = `用时 ${job.duration} 秒完成`;
-
-  openFileBtn.onclick = () => {
-    fetch('/api/open-file', {
+// ------------------------------------------------------------------ open
+el.openVideo.addEventListener('click', async () => {
+  if (!state.outputPath) return;
+  if (desktop) await window.h2m.openPath(state.outputPath);
+  else {
+    await fetch('/api/open-file', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filePath: job.outputPath })
+      body: JSON.stringify({ filePath: state.outputPath }),
     });
-  };
-
-  openFolderBtn.onclick = () => {
-    fetch('/api/open-folder', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folderPath: job.outputDir })
-    });
-  };
-}
-
-newExportBtn.addEventListener('click', resetUI);
-
-function showError(message, logs) {
-  backdrop.resume();
-  progressSection.style.display = 'none';
-  errorSection.style.display = '';
-  errorMessage.textContent = message;
-  errorLogBox.textContent = (logs || []).join('\n');
-}
-
-retryBtn.addEventListener('click', () => {
-  errorSection.style.display = 'none';
-  resetUI();
+  }
 });
 
-function resetUI() {
-  backdrop.resume();
-  progressSection.style.display = 'none';
-  completeSection.style.display = 'none';
-  errorSection.style.display = 'none';
-  renderBtn.style.display = '';
-  setProgress(0);
-  currentJobId = null;
-}
+el.openFolder.addEventListener('click', async () => {
+  const dir = state.outputDir || (state.outputPath || '').replace(/[\\/][^\\/]+$/, '');
+  if (!dir) return;
+  if (desktop) await window.h2m.openPath(dir);
+  else {
+    await fetch('/api/open-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderPath: dir }),
+    });
+  }
+});
 
-// Health check
-healthBtn.addEventListener('click', async () => {
-  healthModal.style.display = 'flex';
-  healthContent.innerHTML = '正在检查依赖…';
+// ------------------------------------------------------------------ init
+(async function init() {
+  if (desktop) {
+    try {
+      const v = await window.h2m.version();
+      if (v) el.version.textContent = `v${v}`;
+    } catch {}
+  }
 
   try {
-    const res = await fetch('/api/health');
-    const data = await res.json();
-
-    healthContent.innerHTML = `
-      <div class="${data.node ? 'health-ok' : 'health-fail'}">
-        ${data.node ? '✅' : '❌'} Node.js
-      </div>
-      <div class="${data.ffmpeg ? 'health-ok' : 'health-fail'}">
-        ${data.ffmpeg ? '✅' : '❌'} FFmpeg ${data.ffmpegPath ? `<small style="color:var(--cream-mute)">(${data.ffmpegPath})</small>` : ''}
-      </div>
-      <div class="${data.browser ? 'health-ok' : 'health-fail'}">
-        ${data.browser ? '✅' : '❌'} ${data.engine || '渲染引擎'}
-        ${data.browserError ? `<br><small style="color:var(--cream-mute)">${data.browserError}</small>` : ''}
-      </div>
-      <div style="margin-top:12px;padding-top:12px;border-top:3px solid var(--cream-mute);font-family:var(--display);letter-spacing:.5px;${data.allGood ? 'color:var(--orange)' : 'color:var(--alarm)'}">
-        ${data.allGood ? '✅ 一切正常，可以导出了！' : '⚠️ 请先修复上面缺失的依赖'}
-      </div>
-    `;
-  } catch (err) {
-    healthContent.innerHTML = `<div class="health-fail">检查失败：${err.message}</div>`;
-  }
-});
-
-closeHealth.addEventListener('click', () => {
-  healthModal.style.display = 'none';
-});
-healthModal.addEventListener('click', (e) => {
-  if (e.target === healthModal) healthModal.style.display = 'none';
-});
-
-// Open the output folder (to browse previously rendered videos)
-openOutputBtn.addEventListener('click', () => {
-  fetch('/api/open-output', { method: 'POST' }).catch(() => {});
-});
-
-// Rubber-hose backdrop: a slow sunburst behind a drifting halftone screen,
-// the two things every 1930s cartoon cel had going on behind the character.
-function initBackdrop() {
-  const canvas = document.getElementById('bgParticles');
-  if (!canvas) return { pause() {}, resume() {} };
-
-  const ctx = canvas.getContext('2d');
-  const RAYS = 16;
-  const DOT_STEP = 30;
-  const FRAME_MS = 1000 / 24;   // the backdrop never needs 60fps
-  let w, h, dpr, cx, cy, radius;
-  let running = false, raf = 0, last = 0, t = 0;
-
-  function resize() {
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-    w = canvas.width = window.innerWidth * dpr;
-    h = canvas.height = window.innerHeight * dpr;
-    canvas.style.width = window.innerWidth + 'px';
-    canvas.style.height = window.innerHeight + 'px';
-    cx = w * 0.5;
-    cy = h * 0.3;
-    radius = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy));
-    draw(0);
-  }
-
-  function draw(dt) {
-    t += dt;
-    ctx.clearRect(0, 0, w, h);
-
-    // Sunburst wedges, turning about once every four minutes.
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(t * 0.000026);
-    ctx.fillStyle = 'rgba(241, 114, 23, 0.055)';
-    const step = (Math.PI * 2) / RAYS;
-    for (let i = 0; i < RAYS; i++) {
-      const a0 = i * step;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.arc(0, 0, radius, a0, a0 + step * 0.5);
-      ctx.closePath();
-      ctx.fill();
+    const settings = await (await fetch('/api/settings')).json();
+    if (settings.width) el.width.value = settings.width;
+    if (settings.height) el.height.value = settings.height;
+    if (settings.fps) el.fps.value = String(settings.fps);
+    if (settings.quality) el.quality.value = settings.quality;
+    if (settings.outputPath) {
+      state.outputPath = settings.outputPath;
+      el.outputPath.value = settings.outputPath;
     }
-    ctx.restore();
-
-    // Halftone screen: dots grow towards the edges, like a printed gradient.
-    const stepPx = DOT_STEP * dpr;
-    const drift = (t * 0.006) % stepPx;
-    ctx.fillStyle = 'rgba(253, 251, 246, 0.05)';
-    for (let y = -stepPx + drift; y < h + stepPx; y += stepPx) {
-      for (let x = -stepPx + drift; x < w + stepPx; x += stepPx) {
-        const d = Math.hypot(x - cx, y - cy) / radius;
-        const r = (0.4 + d * 1.9) * dpr;
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    // Keep the middle of the page dark enough to read against.
-    const vignette = ctx.createRadialGradient(cx, cy, radius * 0.15, cx, cy, radius);
-    vignette.addColorStop(0, 'rgba(11, 10, 8, 0)');
-    vignette.addColorStop(1, 'rgba(11, 10, 8, 0.75)');
-    ctx.fillStyle = vignette;
-    ctx.fillRect(0, 0, w, h);
-  }
-
-  function loop(now) {
-    if (!running) return;
-    raf = requestAnimationFrame(loop);
-    const dt = now - last;
-    if (dt < FRAME_MS) return;
-    last = now;
-    draw(dt);
-  }
-
-  const api = {
-    pause() {
-      running = false;
-      cancelAnimationFrame(raf);
-    },
-    resume() {
-      if (running) return;
-      running = true;
-      last = performance.now();
-      raf = requestAnimationFrame(loop);
-    },
-  };
-
-  resize();
-  window.addEventListener('resize', resize);
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) api.pause(); else api.resume();
-  });
-  api.resume();
-  return api;
-}
-
-// Init
-const backdrop = initBackdrop();
-init();
+    syncChipsWithSize();
+  } catch {}
+})();
