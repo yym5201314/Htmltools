@@ -1,6 +1,6 @@
 {
   "name": "html2mp4",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "轻量本地 HTML 转 MP4 工具，面向创作者与演示",
   "main": "electron/main.js",
   "type": "module",

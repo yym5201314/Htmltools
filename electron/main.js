@@ -7,6 +7,9 @@ import { ElectronRenderer } from './electron-renderer.js';
 // Deterministic, headless-friendly offscreen rendering.
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('force-device-scale-factor', '1');
+// Pages that drive their timeline with <audio>/<video> call play() before any
+// user gesture; allow it so their clock can start.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || '38470';

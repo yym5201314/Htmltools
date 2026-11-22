@@ -28,8 +28,9 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function waitForPaint(wc, timeout) {
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, timeout);
-    wc.once('paint', () => { clearTimeout(t); resolve(); });
+    const onPaint = () => { clearTimeout(t); resolve(); };
+    const t = setTimeout(() => { wc.removeListener('paint', onPaint); resolve(); }, timeout);
+    wc.once('paint', onPaint);
   });
 }
 
@@ -122,6 +123,16 @@ export class ElectronRenderer {
       // Let fonts + layout settle before the first capture.
       await wc.executeJavaScript('document.fonts && document.fonts.ready ? document.fonts.ready.then(() => true) : true');
       await delay(300);
+
+      // Click through any "start / play" cover so the page's own clock begins.
+      const started = await wc
+        .executeJavaScript('window.__h2m_autostart ? window.__h2m_autostart() : false')
+        .catch(() => false);
+      if (started) {
+        this.onLog('已触发页面的开始播放交互');
+        await delay(250);
+      }
+
       await wc.executeJavaScript('window.__h2m_pause && window.__h2m_pause()');
 
       this.onLog('正在捕获帧…');
