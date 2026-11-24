@@ -74,9 +74,15 @@ function baseName(p) {
   return name.replace(/\.(html?|htm)$/i, '');
 }
 
-function joinPath(dir, name) {
-  if (!dir) return '';
-  return `${dir.replace(/[\\/]+$/, '')}\\${name}`;
+function dirOf(p) {
+  return String(p || '').replace(/[\\/][^\\/]*$/, '');
+}
+
+// Output defaults to a sibling of the chosen HTML, named after it.
+function defaultOutputFor(p) {
+  const dir = dirOf(p);
+  const name = baseName(p) || 'html2mp4-导出';
+  return dir ? `${dir}\\${name}.mp4` : `${name}.mp4`;
 }
 
 // ------------------------------------------------------------- input pick
@@ -105,7 +111,7 @@ el.fallbackFile.addEventListener('change', () => {
 
 el.pickOutput.addEventListener('click', async () => {
   if (!desktop) return;
-  const suggested = baseName(state.inputPath) || 'html2mp4-导出';
+  const suggested = state.outputPath || (state.inputPath ? defaultOutputFor(state.inputPath) : '');
   const p = await window.h2m.pickOutput(suggested);
   if (p) {
     state.outputPath = p;
@@ -153,11 +159,11 @@ async function setInput(path, isDir) {
   state.pageAudio = [];
   showPageAudio();
 
-  if (!el.outputPath.value && desktop) {
-    const suggested = state.inputName || 'html2mp4-导出';
-    state.outputPath = '';
-    el.outputPath.placeholder = `默认：用户目录\\html2mp4-output\\${suggested}.mp4`;
-  }
+  // Follow the HTML: same folder, same base name, .mp4 extension. When a folder
+  // was picked the HTML lives inside it, so the video goes there too.
+  const name = baseName(path) || 'html2mp4-导出';
+  state.outputPath = isDir ? `${String(path).replace(/[\\/]+$/, '')}\\${name}.mp4` : defaultOutputFor(path);
+  el.outputPath.value = state.outputPath;
 
   if (isDir) appendLog(`已选择文件夹：${path}`);
   await probe();
@@ -417,10 +423,6 @@ el.openFolder.addEventListener('click', async () => {
     if (settings.height) el.height.value = settings.height;
     if (settings.fps) el.fps.value = String(settings.fps);
     if (settings.quality) el.quality.value = settings.quality;
-    if (settings.outputPath) {
-      state.outputPath = settings.outputPath;
-      el.outputPath.value = settings.outputPath;
-    }
     syncChipsWithSize();
   } catch {}
 })();

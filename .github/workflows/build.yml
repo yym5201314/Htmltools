@@ -1,9 +1,10 @@
-name: Build installer
+name: Build portable exe
 
-# 只构建 Windows 安装包（NSIS .exe）。
+# 只构建免安装的 Windows 便携版（single .exe，双击即用）。
+# 本机构建由 npm run dist 负责；这里只做 GitHub 侧的备份构建。
 #
-# • 推送 v* 标签 → 构建并直接把 .exe 挂到 GitHub Releases（正式发布，非草稿）
-# • Actions 页面 → "Run workflow" 只做一次构建自检，不产出 Release
+# • 推送 v* 标签 → 构建并把 .exe 挂到 GitHub Releases
+# • Actions 页面 "Run workflow" → 只构建，不发布
 on:
   workflow_dispatch:
   push:
@@ -28,11 +29,9 @@ jobs:
       - name: Install dependencies (pulls Electron + FFmpeg)
         run: npm ci
 
-      - name: Build installer
+      - name: Build portable exe
         run: npm run dist
 
-      # Released directly, no intermediate build artifacts: the .exe lands on the
-      # Releases page as the tag's downloadable asset.
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2

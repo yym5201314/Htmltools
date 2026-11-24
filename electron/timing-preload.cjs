@@ -6,6 +6,10 @@
   let callbacks = [];
   let nextId = 1;
 
+  // Keep the real rAF: the override below is a queue we drive by hand, so it
+  // can't be used to detect an actually composited frame.
+  const nativeRaf = window.requestAnimationFrame.bind(window);
+
   window.requestAnimationFrame = (cb) => {
     const id = nextId++;
     callbacks.push({ id, cb });
@@ -95,20 +99,43 @@
     }
   }
 
+  // Style changes only reach the screen after the compositor produces a frame.
+  // Waiting two real rAFs makes sure transform/opacity updates are committed
+  // before the screenshot, otherwise frames flicker with a stale paint.
+  function settleFrame() {
+    void document.documentElement.offsetHeight;
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      nativeRaf(() => nativeRaf(done));
+      setTimeout(done, 40);
+    });
+  }
+
   // Absolute seek (used by the probe) and per-frame advance (used by the renderer).
   window.__h2m_seek = (t) => {
     currentTime = t;
-    return seekMedia(currentTime / 1000).then(() => {
-      flush();
-      return currentTime;
-    });
+    return seekMedia(currentTime / 1000)
+      .then(() => {
+        void document.documentElement.offsetHeight;
+        flush();
+        return settleFrame();
+      })
+      .then(() => currentTime);
   };
   window.__h2m_advance = (dt) => {
     currentTime += dt;
-    return seekMedia(currentTime / 1000).then(() => {
-      flush();
-      return currentTime;
-    });
+    return seekMedia(currentTime / 1000)
+      .then(() => {
+        void document.documentElement.offsetHeight;
+        flush();
+        return settleFrame();
+      })
+      .then(() => currentTime);
   };
   window.__h2m_pause = () => {
     if (document.getAnimations) {
@@ -121,7 +148,47 @@
   // timeline. Nobody clicks during a render, so dispatch a real click for them.
   const silentForUs = new WeakSet();
 
-  window.__h2m_autostart = () => {
+  const COVER_SELECTOR =
+    '#cover, .cover, [class*="cover" i], [class*="intro" i], [class*="splash" i], [class*="start-screen" i], [class*="landing" i]';
+
+  function clickable(el) {
+    if (!isVisible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+    const style = getComputedStyle(el);
+    return style.pointerEvents !== 'none';
+  }
+
+  function findCover() {
+    return Array.from(document.querySelectorAll(COVER_SELECTOR)).find(clickable) || null;
+  }
+
+  // Click the cover itself, then the first usable button inside it. Plenty of
+  // pieces put the real listener on the button rather than the overlay.
+  function startTargets() {
+    const cover = findCover();
+    if (cover) {
+      const targets = [cover];
+      const inner = Array.from(cover.querySelectorAll('button, [role="button"], a')).find(clickable);
+      if (inner) targets.push(inner);
+      return targets;
+    }
+    const startLike = Array.from(document.querySelectorAll('button, [role="button"], a')).find(
+      (el) => clickable(el) && /start|play|begin|开始|播放|进入|重播/i.test(`${el.id} ${el.className} ${el.textContent}`)
+    );
+    return startLike ? [startLike] : [];
+  }
+
+  function fireClick(target) {
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      try {
+        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      } catch {}
+    }
+  }
+
+  // Many pieces wait for a click on a cover / play button before starting their
+  // timeline. Nobody clicks during a render, so click for them - retrying,
+  // because the button is often disabled until the artwork has loaded.
+  window.__h2m_autostart = async () => {
     // Silence media first: muted playback is never blocked, so the page's
     // play() promise resolves and its clock loop actually starts. Remember
     // which elements were audible, so the audio collector still reports them.
@@ -131,28 +198,27 @@
       el.defaultMuted = true;
     }
 
-    const groups = [
-      '#cover, .cover, [class*="cover" i]',
-      '.start, #start, .play, #play, [class*="start" i], [class*="play" i]',
-      'button, [role="button"]',
-    ];
-    let target = null;
-    for (const selector of groups) {
-      const found = Array.from(document.querySelectorAll(selector)).filter((el) => isVisible(el));
-      if (found.length > 0) {
-        target = found[0];
-        break;
-      }
-    }
-    if (target == null) return false;
+    const cover = findCover();
+    const baseline = callbacks.length; // page may already run a loop of its own
+    if (!cover && baseline > 0) return false; // already animating, nothing to unlock
 
-    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-      try {
-        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-      } catch {}
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const targets = startTargets();
+      for (const target of targets) {
+        fireClick(target);
+        await new Promise((r) => setTimeout(r, 180));
+        // Two independent "it started" signals: the cover disappears, or the
+        // page scheduled a new animation frame that previously wasn't there.
+        if (cover && !isVisible(cover)) return true;
+        if (callbacks.length > baseline) return true;
+      }
+      if (targets.length === 0 && attempt > 2) return false;
+      await new Promise((r) => setTimeout(r, 240));
     }
-    return true;
+    return false;
   };
+
+  window.__h2m_pending = () => callbacks.length;
 
   // Audio that the page actually plays, so it can be muxed into the MP4.
   window.__h2m_audio = () => {

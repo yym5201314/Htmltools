@@ -1,32 +1,22 @@
-# Dependencies
+# 依赖（本地构建时 npm install 生成，GitHub Actions 会自己 npm ci）
 node_modules/
 
-# Build output. Installers are attached to GitHub Releases, never committed
-# (a .dmg is ~141 MB, well past GitHub's 100 MB per-file limit)
+# 构建产物：本地构建的 exe 与中间目录都不进仓库
 dist/
-build/*.icns
-*.dmg
 *.exe
-*.AppImage
 *.blockmap
 
-# Render output
+# 渲染输出
 frames/
 html2mp4-output/
 *.mp4
 
-# Editors / OS
+# 编辑器 / 系统
 .DS_Store
 .*.icloud
 .vscode/
 .idea/
 *.swp
 
-# Local tooling
+# 本地工具
 .claude/
-
-# Superseded brand art, kept locally but not published. The current marks are
-# public/mascot.png, public/appicon.png and build/icon.png
-/Logo For Html2mp4.png
-/assets/
-/public/logo.png

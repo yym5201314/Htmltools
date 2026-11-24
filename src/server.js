@@ -129,7 +129,11 @@ app.post('/api/render', upload.array('files', 100), async (req, res) => {
   const fps = config.fps || preset.fps;
   const duration = config.duration || preset.duration;
   const quality = config.quality || 'standard';
-  const outputName = config.outputName || `html2mp4-${Date.now()}`;
+  const outputName =
+    config.outputName ||
+    (config.localPath
+      ? path.basename(config.localPath).replace(/\.(html?|htm)$/i, '')
+      : `html2mp4-${Date.now()}`);
   const hideControls = config.hideControls !== false;
 
   // Determine input path
@@ -146,12 +150,15 @@ app.post('/api/render', upload.array('files', 100), async (req, res) => {
     return res.status(400).json({ error: '未提供输入文件' });
   }
 
-  // Determine output path
+  // Determine output path: next to the HTML by default, same base name.
+  const defaultDir = config.localPath
+    ? path.dirname(path.resolve(config.localPath))
+    : config.outputDir || path.join(os.homedir(), 'html2mp4-output');
   const outputPath = config.outputPath
     ? path.resolve(config.outputPath)
     : path.join(
         (() => {
-          const dir = config.outputDir || path.join(os.homedir(), 'html2mp4-output');
+          const dir = defaultDir;
           if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
           return dir;
         })(),

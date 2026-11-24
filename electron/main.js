@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, Menu, shell, ipcMain, dialog } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -68,11 +68,20 @@ function registerIpc() {
   });
 
   ipcMain.handle('h2m:pick-output', async (_event, suggested) => {
-    const dir = defaultOutputDir();
-    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    // The UI passes the full "sibling of the HTML" path, so the dialog opens in
+    // the piece's own folder and pre-fills its name.
+    let defaultPath = typeof suggested === 'string' ? suggested.trim() : '';
+    if (!defaultPath) {
+      defaultPath = path.join(defaultOutputDir(), 'html2mp4-导出.mp4');
+    } else if (!path.isAbsolute(defaultPath)) {
+      defaultPath = path.join(defaultOutputDir(), defaultPath);
+    }
+    if (!/\.mp4$/i.test(defaultPath)) defaultPath += '.mp4';
+    try { fs.mkdirSync(path.dirname(defaultPath), { recursive: true }); } catch {}
+
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
       title: '保存 MP4',
-      defaultPath: path.join(dir, `${suggested || 'html2mp4-导出'}.mp4`),
+      defaultPath,
       filters: [{ name: 'MP4 视频', extensions: ['mp4'] }],
     });
     return canceled ? null : filePath;
@@ -122,6 +131,9 @@ async function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // The default Electron menu is English and every entry duplicates something
+  // the OS window or the inputs already provide, so drop the whole bar.
+  Menu.setApplicationMenu(null);
   registerIpc();
   return createWindow();
 });

@@ -21,7 +21,9 @@ const HIDE_CONTROLS_CSS = `
   [class*="timeline-bar" i], [class*="scrubber" i],
   [class*="seekbar" i], [class*="seek-bar" i],
   [class*="player-bar" i], [data-remotion-player-controls],
-  [aria-label="Player controls" i] { display: none !important; }
+  [aria-label="Player controls" i],
+  #hud, [class*="hud" i], [class*="player-ui" i], [class*="playbar" i],
+  [class*="play-bar" i], [class*="timecode" i], [class*="time-code" i] { display: none !important; }
 `;
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -32,6 +34,32 @@ function waitForPaint(wc, timeout) {
     const t = setTimeout(() => { wc.removeListener('paint', onPaint); resolve(); }, timeout);
     wc.once('paint', onPaint);
   });
+}
+
+// Center-crop to the target aspect ratio, then scale. Scaling a capture that is
+// one pixel off would stretch the picture ("拉扯"), so crop first: geometry stays
+// exact and consecutive frames keep identical framing.
+function fitToSize(img, width, height) {
+  const size = img.getSize();
+  if (size.width === width && size.height === height) return img;
+
+  const targetRatio = width / height;
+  const sourceRatio = size.width / size.height;
+  let out = img;
+
+  if (Math.abs(sourceRatio - targetRatio) > 1e-3) {
+    let crop;
+    if (sourceRatio > targetRatio) {
+      const w = Math.max(1, Math.min(size.width, Math.round(size.height * targetRatio)));
+      crop = { x: Math.round((size.width - w) / 2), y: 0, width: w, height: size.height };
+    } else {
+      const h = Math.max(1, Math.min(size.height, Math.round(size.width / targetRatio)));
+      crop = { x: 0, y: Math.round((size.height - h) / 2), width: size.width, height: h };
+    }
+    out = img.crop(crop);
+  }
+
+  return out.resize({ width, height, quality: 'good' });
 }
 
 /**
@@ -192,15 +220,15 @@ export class ElectronRenderer {
         return null;
       }
 
+      // The page resolves this only after a real compositor frame, so the
+      // captured surface already holds the state for this frame index.
       await wc.executeJavaScript(`window.__h2m_advance(${frameDuration})`);
-      await waitForPaint(wc, 24);
+      await waitForPaint(wc, 16);
 
       let img = await wc.capturePage();
       const size = img.getSize();
       if (i === 0) this.onLog(`捕获画布：${size.width}x${size.height}（目标 ${this.width}x${this.height}）`);
-      if (size.width !== this.width || size.height !== this.height) {
-        img = img.resize({ width: this.width, height: this.height, quality: 'good' });
-      }
+      img = fitToSize(img, this.width, this.height);
 
       const buffer = captureType === 'jpeg' ? img.toJPEG(92) : img.toPNG();
       await onFrame(buffer, i);

@@ -6,8 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "electron .",
-    "doctor": "node src/doctor.js",
-    "dist": "electron-builder --win --publish never"
+    "dist": "electron-builder --win portable --publish never"
   },
   "keywords": [
     "html",
@@ -54,7 +53,6 @@
     "files": [
       "src/**/*",
       "public/**/*",
-      "!public/logo.png",
       "electron/**/*",
       "build/icon.png",
       "package.json"
@@ -64,17 +62,9 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
         { "target": "portable", "arch": ["x64"] }
       ],
       "icon": "build/icon.png"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "shortcutName": "HTML转视频",
-      "artifactName": "html2mp4-${version}-setup.${ext}"
     },
     "portable": {
       "artifactName": "html2mp4-${version}-portable.${ext}",
